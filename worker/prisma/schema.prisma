@@ -1,0 +1,262 @@
+// Fulfilio — Prisma schema (v1, post-review)
+// Run: npx prisma migrate dev --name init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────
+// Users & Auth
+// ─────────────────────────────
+
+model User {
+  id             String            @id @default(uuid())
+  email          String            @unique
+  passwordHash   String
+  name           String
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+
+  memberships    WorkspaceMember[]
+  refreshTokens  RefreshToken[]
+  assignedOrders Order[]           @relation("AssignedOrders")
+  notifications  Notification[]
+  invitationsSent Invitation[]     @relation("InvitedBy")
+}
+
+// Rotation-aware refresh tokens: lets you detect reuse of a revoked token,
+// which is the real signal of a stolen refresh token.
+model RefreshToken {
+  id              String        @id @default(uuid())
+  userId          String
+  tokenHash       String        @unique
+  revoked         Boolean       @default(false)
+  revokedAt       DateTime?
+  replacedByToken String?       // id of the token that replaced this one on rotation
+  expiresAt       DateTime
+  createdAt       DateTime      @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// ─────────────────────────────
+// Workspaces (multi-tenancy)
+// ─────────────────────────────
+
+enum Role {
+  OWNER
+  MANAGER
+  STAFF
+}
+
+model Workspace {
+  id            String            @id @default(uuid())
+  name          String
+  slug          String            @unique
+  createdAt     DateTime          @default(now())
+
+  members       WorkspaceMember[]
+  products      Product[]
+  orders        Order[]
+  notifications Notification[]
+  webhookEvents WebhookEvent[]
+  invitations   Invitation[]
+}
+
+model WorkspaceMember {
+  id          String   @id @default(uuid())
+  userId      String
+  workspaceId String
+  role        Role     @default(STAFF)
+  createdAt   DateTime @default(now())
+
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, workspaceId])
+  @@index([workspaceId])
+}
+
+// Real invitation flow — not a shortcut "add member" endpoint.
+// OWNER/MANAGER invites by email → token emailed → invitee accepts → WorkspaceMember created.
+model Invitation {
+  id          String    @id @default(uuid())
+  workspaceId String
+  email       String
+  role        Role      @default(STAFF)
+  tokenHash   String    @unique
+  invitedById String
+  expiresAt   DateTime
+  acceptedAt  DateTime?
+  createdAt   DateTime  @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  invitedBy User      @relation("InvitedBy", fields: [invitedById], references: [id])
+
+  @@index([workspaceId, email])
+}
+
+// ─────────────────────────────
+// Products & Inventory
+// ─────────────────────────────
+
+enum ProductStatus {
+  ACTIVE
+  DRAFT
+  ARCHIVED
+}
+
+model Product {
+  id          String        @id @default(uuid())
+  workspaceId String
+  name        String
+  sku         String
+  description String?
+  category    String?
+  price       Decimal       @db.Decimal(10, 2)
+  status      ProductStatus @default(ACTIVE)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  workspace  Workspace   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  inventory  Inventory?
+  orderItems OrderItem[]
+
+  @@unique([workspaceId, sku])
+  @@index([workspaceId, name])
+  @@index([workspaceId, category])
+}
+
+// Invariant enforced in application code (inside the same transaction as order
+// creation, using SELECT ... FOR UPDATE): reserved >= 0, quantity >= 0, reserved <= quantity.
+model Inventory {
+  id                String   @id @default(uuid())
+  productId         String   @unique
+  quantity          Int      @default(0)
+  reserved          Int      @default(0)
+  lowStockThreshold Int      @default(5)
+  updatedAt         DateTime @updatedAt
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+}
+
+// ─────────────────────────────
+// Orders
+// ─────────────────────────────
+
+enum OrderStatus {
+  PENDING     // stock reserved, awaiting payment
+  PAID
+  PROCESSING
+  FULFILLING
+  SHIPPED
+  DELIVERED
+  CANCELLED   // manually cancelled, stock released
+  EXPIRED     // never paid within window, stock released by delayed job
+  REFUNDED
+  FAILED
+}
+
+model Order {
+  id             String      @id @default(uuid())
+  workspaceId    String
+  customerName   String
+  customerEmail  String
+  status         OrderStatus @default(PENDING)
+  subtotal       Decimal     @db.Decimal(10, 2)
+  total          Decimal     @db.Decimal(10, 2)
+  assignedToId   String?
+  idempotencyKey String?     @unique // dedupes double-submitted POST /orders
+
+  paidAt      DateTime?
+  shippedAt   DateTime?
+  deliveredAt DateTime?
+  cancelledAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  workspace  Workspace   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  assignedTo User?       @relation("AssignedOrders", fields: [assignedToId], references: [id])
+  items      OrderItem[]
+  payment    Payment?
+
+  @@index([workspaceId, status])
+  @@index([workspaceId, createdAt])
+}
+
+model OrderItem {
+  id        String  @id @default(uuid())
+  orderId   String
+  productId String
+  quantity  Int
+  unitPrice Decimal @db.Decimal(10, 2)
+
+  order   Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id])
+
+  @@index([orderId])
+}
+
+// ─────────────────────────────
+// Payments (Stripe Checkout + webhooks — single payment approach for v1)
+// ─────────────────────────────
+
+enum PaymentStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+  REFUNDED
+}
+
+model Payment {
+  id                     String        @id @default(uuid())
+  orderId                String        @unique
+  stripeCheckoutSessionId String?      @unique
+  stripePaymentIntentId  String?       @unique
+  status                 PaymentStatus @default(PENDING)
+  amount                 Decimal       @db.Decimal(10, 2)
+  currency               String        @default("usd")
+  paidAt                 DateTime?
+  createdAt              DateTime      @default(now())
+  updatedAt              DateTime      @updatedAt
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+}
+
+// Idempotency guard for Stripe webhooks — replaying the same event id is a no-op.
+model WebhookEvent {
+  id            String    @id @default(uuid())
+  workspaceId   String?
+  stripeEventId String    @unique
+  type          String
+  processedAt   DateTime  @default(now())
+
+  workspace Workspace? @relation(fields: [workspaceId], references: [id])
+}
+
+// ─────────────────────────────
+// Notifications (real-time layer persistence — no separate subsystem)
+// ─────────────────────────────
+
+model Notification {
+  id          String   @id @default(uuid())
+  workspaceId String
+  userId      String
+  type        String   // "ORDER_STATUS_CHANGED" | "ORDER_ASSIGNED" | "LOW_STOCK" | "PAYMENT_FAILED"
+  message     String
+  read        Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, userId, read])
+}

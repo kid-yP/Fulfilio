@@ -1,0 +1,47 @@
+services:
+  - type: web
+    name: fulfilio-api
+    runtime: docker
+    dockerfilePath: ./api/Dockerfile
+    dockerContext: ./api
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: fulfilio-postgres
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: fulfilio-redis
+          property: connectionString
+      - key: JWT_ACCESS_SECRET
+        generateValue: true
+      - key: JWT_REFRESH_SECRET
+        generateValue: true
+      - key: NODE_ENV
+        value: production
+    healthCheckPath: /health/ready
+
+  - type: worker
+    name: fulfilio-worker
+    runtime: docker
+    dockerfilePath: ./worker/Dockerfile
+    dockerContext: ./worker
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: fulfilio-postgres
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: fulfilio-redis
+          property: connectionString
+
+  - type: redis
+    name: fulfilio-redis
+    ipAllowList: []
+
+databases:
+  - name: fulfilio-postgres
+    plan: free
