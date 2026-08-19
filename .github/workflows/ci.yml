@@ -78,10 +78,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Trigger Render deploy (api)
-        run: curl -fsS -X POST "${{ secrets.RENDER_DEPLOY_HOOK_API }}"
+        env:
+          RENDER_DEPLOY_HOOK_API: ${{ secrets.RENDER_DEPLOY_HOOK_API }}
+        run: |
+          if [ -n "$RENDER_DEPLOY_HOOK_API" ]; then
+            curl -fsS -X POST "$RENDER_DEPLOY_HOOK_API"
+          else
+            echo "RENDER_DEPLOY_HOOK_API not set — skipping API deploy"
+          fi
 
       - name: Trigger Render deploy (worker)
-        run: curl -fsS -X POST "${{ secrets.RENDER_DEPLOY_HOOK_WORKER }}"
+        env:
+          RENDER_DEPLOY_HOOK_WORKER: ${{ secrets.RENDER_DEPLOY_HOOK_WORKER }}
+        run: |
+          if [ -n "$RENDER_DEPLOY_HOOK_WORKER" ]; then
+            curl -fsS -X POST "$RENDER_DEPLOY_HOOK_WORKER"
+          else
+            echo "RENDER_DEPLOY_HOOK_WORKER not set — skipping worker deploy"
+          fi
 
       # Vercel auto-deploys the frontend on push to main once the repo is
       # connected in the Vercel dashboard — no extra step needed here.
