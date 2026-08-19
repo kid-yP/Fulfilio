@@ -9,17 +9,19 @@ services:
         fromDatabase:
           name: fulfilio-postgres
           property: connectionString
-      - key: REDIS_URL
-        fromService:
-          type: redis
-          name: fulfilio-redis
-          property: connectionString
       - key: JWT_ACCESS_SECRET
         generateValue: true
       - key: JWT_REFRESH_SECRET
         generateValue: true
       - key: NODE_ENV
         value: production
+      - key: ACCESS_TOKEN_TTL
+        value: 15m
+      - key: REFRESH_TOKEN_TTL_DAYS
+        value: 7
+      - key: CLIENT_URL
+        value: http://localhost:3000
+      # REDIS_URL will be added manually after creating an Upstash Redis database
     healthCheckPath: /health/ready
 
   - type: worker
@@ -32,15 +34,9 @@ services:
         fromDatabase:
           name: fulfilio-postgres
           property: connectionString
-      - key: REDIS_URL
-        fromService:
-          type: redis
-          name: fulfilio-redis
-          property: connectionString
-
-  - type: redis
-    name: fulfilio-redis
-    ipAllowList: []
+      - key: NODE_ENV
+        value: production
+      # REDIS_URL will be added manually after creating an Upstash Redis database
 
 databases:
   - name: fulfilio-postgres
