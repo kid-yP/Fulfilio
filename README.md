@@ -134,7 +134,7 @@ Optional: seed demo data
 
 cd api
 npx prisma db seed
-# demo credentials: owner@fulfilio.dev / demo12345 (if seed exists)
+## demo credentials: owner@fulfilio.dev / demo12345 (if seed exists)
 Stripe & webhook testing (local)
 Install Stripe CLI and forward events to your local webhook:
 npm install -g @stripe/cli
