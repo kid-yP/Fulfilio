@@ -19,7 +19,12 @@ export function createApp() {
   const app = express();
 
   app.use(helmet());
-  app.use(cors({ origin: env.CLIENT_URL, credentials: true }));
+
+  // Allow all origins for now — needed because the frontend is hosted
+  // on Vercel and the backend is exposed via a temporary Cloudflare Tunnel.
+  // For production, replace `origin: true` with your exact frontend URL.
+  app.use(cors({ origin: true, credentials: true }));
+
   app.use(morgan(env.NODE_ENV === "development" ? "dev" : "combined"));
 
   // MUST be registered before express.json(): Stripe's webhook signature
