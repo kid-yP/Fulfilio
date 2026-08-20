@@ -192,7 +192,57 @@ export DATABASE_URL="postgresql://fulfilio:fulfilio@localhost:5432/fulfilio_test
 cd api && npx prisma db push --skip-generate && npm test
 ```
 
-## Getting this into a real repo, PR, and staging deploy
+## Frontend (client/)
+
+A Next.js 14 (App Router) + TypeScript + Tailwind dashboard in `client/` —
+auth, workspace switching, product catalog, order creation, and Stripe
+checkout handoff, plus live Socket.IO updates and the AI daily-summary card.
+Design direction and rationale are written up in `client/DESIGN.md`.
+
+**Note:** this was built without the ability to run `npm install` or
+`next build` in the environment that generated it (no network access there)
+— it's written carefully but your first real compile is the actual
+verification. Report back anything that breaks and it'll get fixed fast.
+
+### Running it
+
+```bash
+cd client
+cp .env.local.example .env.local
+# edit .env.local if your API isn't on the default http://localhost:4000
+npm install
+npm run dev
+```
+
+Opens on `http://localhost:3000`. It talks to whatever `NEXT_PUBLIC_API_URL`
+points at — run the backend (`docker compose up` from the repo root, or
+`cd api && npm run dev` + `cd worker && npm run dev` separately) first, or
+the frontend has nothing to call.
+
+Register a new account from the UI, or sign in with a seeded demo user
+(`owner@fulfilio.dev` / `demo12345` after `cd api && npx prisma db seed`) —
+either way you'll be prompted to create or select a workspace before
+anything else loads.
+
+### What it covers vs. what it doesn't
+
+Covers: register/login (with refresh-token rotation handled transparently —
+an access token expiring mid-session triggers one silent refresh, not a
+forced logout), first-run workspace creation and switching, product
+browsing with inventory adjustment (+1/−1), product creation, multi-item
+order creation with the `Idempotency-Key` header wired to match the
+backend's dedupe contract, order status advancement/cancellation/assignment,
+Stripe checkout handoff, live order/inventory/presence updates over the
+same Socket.IO connection the backend exposes, and the AI daily-summary
+card on the overview page.
+
+Doesn't cover (not in scope for this pass): invitations UI (accepting/
+sending invites), AI triage UI (the daily-summary card is built; triage
+isn't), member role management UI, search/pagination on the product list.
+All of those already work against the existing API — this is a client-side
+gap, not a backend one.
+
+
 
 I can't do this step myself — there's no live GitHub repo or hosting account
 connected to this project, so what follows is exactly what to run yourself.

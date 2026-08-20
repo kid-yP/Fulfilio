@@ -1,6 +1,31 @@
+# Dependencies
 node_modules/
+api/node_modules/
+worker/node_modules/
+client/node_modules/
+
+# Environment files (never commit real secrets)
 .env
+.env.local
+.env.*.local
+!.env.example
+!client/.env.local.example
+
+# Build output
+api/dist/
+worker/dist/
+client/.next/
+client/out/
+
+# Logs
 *.log
-dist/
-coverage/
+npm-debug.log*
+
+# OS/editor cruft
+.DS_Store
+.vscode/
+.idea/
 desktop.ini
+
+# Test artifacts
+coverage/
