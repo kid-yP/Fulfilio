@@ -1,276 +1,210 @@
 # Fulfilio — Real-Time Order & Fulfillment Operations Platform
 
-A multi-tenant B2B platform where teams manage products, inventory, orders,
-and payments together in real time, with a small set of integrated AI
-features (daily operational summary, order triage) built on real data rather
-than bolted on as a demo.
+A production-style, multi-tenant B2B platform where teams (warehouses, distributors, agencies) manage products, inventory, orders, payments and collaborate in real time. Small, useful AI features (daily operational summary & order triage) are integrated on real operational data rather than bolted on.
 
-**Status: v1 feature-complete** (Phases 0–7). Not yet done: an actual
-frontend, and the hardening/deploy steps that require you to run them
-yourself — see "Getting this deployed" below.
+**Live frontend:** https://fulfilio-omega.vercel.app  
+**Status:** v1 feature-complete — backend tested & CI-protected, frontend deployed to Vercel, deploy blueprint for backend included.
 
-## Architecture
+---
 
-```
-                    Client (React, functional UI — not yet built)
-                              │
-                        HTTPS │ WSS
-                              ▼
-                 ┌────────────────────────┐
-                 │   Express API (TS)     │──── Swagger (not yet added)
-                 │   + Socket.IO server   │
-                 └───────────┬────────────┘
-                              │
-              ┌───────────────┼───────────────┐
-              ▼               ▼               ▼
-        PostgreSQL          Redis         (same process:
-        (Prisma)         cache + rate      Socket.IO rooms
-                            limit           per workspace)
-              │               │
-              │               ▼
-              │            BullMQ
-              │               │
-              │               ▼
-              │         Worker (separate
-              │          container/process)
-              │        ┌──────┼───────┐
-              │        ▼      ▼       ▼
-              │     Email  Invoice  Low-stock
-              │                     + reservation
-              │                       expiry
-              └── Stripe Webhook → signature verify → idempotency table
-                                    → update Order/Payment → emit socket event
-```
+## Features
 
-## What's built (Phase 0 → 7)
+- **Authentication & Multi-tenancy** — JWT access + refresh token rotation & reuse detection; workspace-scoped RBAC (OWNER / MANAGER / STAFF); invite → accept flow.
+- **Products & Inventory** — CRUD, search/filter/pagination, Redis-cached listings, row-level locking (`SELECT ... FOR UPDATE`) enforcing `quantity >= 0` and `reserved <= quantity`.
+- **Orders** — transactional stock reservation, `Idempotency-Key` support (dedupe double submits), lifecycle (PENDING → PAID → PROCESSING → FULFILLING → SHIPPED → DELIVERED), cancellation + delayed reservation expiry.
+- **Payments** — Stripe Checkout, signature-verified webhooks, idempotent event processing, inventory release on checkout expiry.
+- **Real-time** — Socket.IO rooms per workspace, presence, live order status updates, low-stock notifications.
+- **AI (small, useful)** — daily fulfillment summary & order triage using operational data; falls back to deterministic template if no LLM key is configured.
+- **Background jobs** — BullMQ worker with queues: invite email, order confirmation, invoice generation, low-stock alert, reservation expiry, daily summary trigger.
+- **Testing** — 37 integration/unit tests (runs against a real Postgres instance).
+- **CI/CD** — GitHub Actions runs typecheck, migrations and tests on every push; `render.yaml` blueprint included for fast staging provisioning.
 
-**Auth & multi-tenancy** — JWT + refresh-token rotation with reuse detection,
-workspace-scoped RBAC (OWNER/MANAGER/STAFF), full invite → accept flow.
+---
 
-**Products & inventory** — CRUD, search/filter/pagination, Redis-cached
-listings (version-based invalidation), row-locked stock adjustments enforcing
-`quantity >= 0` and `reserved <= quantity`.
+## Architecture (high level)
 
-**Orders** — transactional stock reservation across multiple items with
-deterministic lock ordering (prevents deadlocks), `Idempotency-Key` header
-support (a repeated key returns the original order, not a duplicate), a
-7-state order lifecycle with an explicit transition allow-list, cancellation
-that releases reserved stock immediately, a delayed BullMQ job that releases
-stock automatically if an order is never paid, and assignment to a workspace
-member.
+Client (Next.js + Tailwind)
+HTTPS │ WSS
+▼
+Express API (TypeScript)
++ Socket.IO server
+│
+┌───────┼────────┬────────┐
+▼ ▼ ▼ ▼
+Postgres Redis BullMQ Stripe Webhook
+(Prisma) (cache +queues) (signature verify → idempotency guard)
+│
+Worker process (emails / invoices / expiry)
 
-**Payments** — Stripe Checkout, webhook signature verification, idempotent
-event handling (a replayed webhook event is a proven no-op), automatic
-inventory release on `checkout.session.expired`.
+---
 
-**Real-time** — Socket.IO, one room per workspace, membership verified
-before a socket can join a room. Events: order created/status changed/
-assigned, inventory low-stock, live notifications, and basic presence
-(online/offline, "viewing this order").
+## Technology stack
 
-**AI (small, on purpose)** — daily fulfillment summary and order triage,
-both built on real query data (today's order counts, low-stock products,
-failed payments, average fulfillment time). Works with or without an
-`ANTHROPIC_API_KEY` — falls back to a deterministic, still-genuinely-useful
-template when no key is configured, so the demo never breaks.
+- **Backend:** Node.js, Express, TypeScript, PostgreSQL, Prisma, Redis, BullMQ, Socket.IO  
+- **Frontend:** Next.js 14, React, TypeScript, Tailwind CSS  
+- **Payments:** Stripe Checkout + Webhooks  
+- **Email (recommended):** Resend (console-stubs in v1)  
+- **Hosting (recommended):** Render for backend, Vercel for frontend  
+- **AI (optional):** Anthropic Claude (or other LLM); fallback template supported  
+- **Testing:** Jest, Supertest (real Postgres)  
+- **CI/CD:** GitHub Actions
 
-**Background jobs** — BullMQ worker with six queues: invitation email,
-order confirmation email, invoice generation, low-stock alert, reservation
-expiry, daily-summary trigger. Email/invoice handlers are logging stubs
-(see "Known limitations").
+---
 
-**Tests** — 4 suites, ~35 cases total, run against a real Postgres (no
-mocked DB — only Stripe, Anthropic, and the BullMQ queue layer are mocked).
-The six proof points specifically worth reading:
+## Project structure
 
-1. **Concurrency** — `order.test.ts`: two simultaneous requests for the last
-   unit of stock; exactly one succeeds, reserved stock ends at 1, not 2.
-2. **Multi-tenancy / auth isolation** — every test file: a real, authenticated
-   OWNER of a *different* workspace gets the same 404 as a nonexistent ID.
-3. **Payment idempotency** — `payment.test.ts`: replaying the same Stripe
-   event ID is a proven no-op (order transitions exactly once).
-4. **Order idempotency** — `order.test.ts`: a repeated `Idempotency-Key`
-   returns the original order and reserves stock exactly once.
-5. **Async processing** — order confirmation, invoices, and low-stock alerts
-   are queued jobs, not inline work in the request/response cycle.
-6. **Caching** — `product.service.ts`: version-based Redis cache with
-   invalidation on every write, covered implicitly by the product tests
-   (not independently asserted — see known limitations).
+Fulfilio/
+├── api/ # Express API (TypeScript)
+│ ├── prisma/ # schema, migrations, seed
+│ ├── src/
+│ │ ├── controllers/
+│ │ ├── services/
+│ │ ├── middleware/
+│ │ ├── realtime/ # Socket.IO server
+│ │ ├── routes/
+│ │ ├── config/
+│ │ └── lib/ # Prisma, Redis, queues
+│ └── tests/ # Jest integration tests
+├── worker/ # BullMQ worker
+├── client/ # Next.js frontend
+├── .github/workflows/ci.yml
+├── docker-compose.yml
+├── render.yaml # Render Blueprint for staging/prod
+├── .env.example
+└── README.md
 
-## Known limitations (documented deliberately, not accidentally)
+---
 
-- **No shared package between `api/` and `worker/`** — queue name constants
-  are duplicated in both. Fine at this size; extract into an internal
-  package if the queue list keeps growing.
-- **Cross-process real-time gap** — the reservation-expiry job runs in the
-  worker process and updates the database correctly, but can't push a live
-  Socket.IO event to connected clients (the socket server lives in the API
-  process only). A client would see the change on next fetch, not
-  instantly. Bridging this needs a Redis pub/sub adapter
-  (`@socket.io/redis-adapter`) — a reasonable v2 addition, deliberately not
-  built now to avoid adding multi-instance infrastructure a single-instance
-  demo doesn't need.
-- **Email is a console-log stub** — every "email" job (invitation, receipt,
-  invoice) logs to the worker's stdout instead of sending anything. Wiring
-  Resend is a one-file change in `api/src/lib/mailer.ts` and the worker's
-  job handlers, deliberately deferred until there's a real domain to send
-  from.
-- **AI tests only exercise the fallback path** — the Anthropic SDK is
-  mocked in tests specifically so they never make a real network call
-  regardless of local `.env` contents. The "real LLM" path is exercised
-  manually, not by the automated suite.
-- **No frontend yet.**
-- **No Swagger/OpenAPI docs yet** — the route list below is the spec for now.
+## Getting started (local development)
 
-## Full route list
+### Prerequisites
 
-```
-/api/v1/auth                          register, login, refresh, logout
-/api/v1/workspaces                    create, list mine
-/api/v1/workspaces/:id                get, members
-/api/v1/workspaces/:id/invite         POST  (OWNER/MANAGER)
-/api/v1/workspaces/:id/members/:uid   PATCH role, DELETE  (OWNER)
-/api/v1/invitations/:token/accept     POST
+- Node.js 20+
+- Docker Desktop (for PostgreSQL & Redis)
+- Stripe CLI (optional, for webhook testing)
 
-/api/v1/workspaces/:id/products       POST/GET  (?search=&category=&status=&page=&limit=&sort=)
-/api/v1/workspaces/:id/products/:pid  GET/PATCH/DELETE
-/api/v1/workspaces/:id/inventory/:pid GET/PATCH  { adjustment: number }
+### Clone
 
-/api/v1/workspaces/:id/orders                    POST (Idempotency-Key header optional) / GET (?status=&page=&limit=)
-/api/v1/workspaces/:id/orders/:oid               GET
-/api/v1/workspaces/:id/orders/:oid/status         PATCH { status }
-/api/v1/workspaces/:id/orders/:oid/cancel         POST
-/api/v1/workspaces/:id/orders/:oid/assignment     PATCH { assignedToId }  (OWNER/MANAGER)
-/api/v1/workspaces/:id/orders/:oid/checkout       POST → Stripe Checkout session
-/api/v1/payments/webhook                          POST (Stripe, raw body)
+ bash
+git clone https://github.com/kid-yP/Fulfilio.git
+cd Fulfilio
 
-/api/v1/workspaces/:id/ai/daily-summary   POST
-/api/v1/workspaces/:id/ai/triage          POST
+---
 
-/health
-/health/ready
-```
-
-## Running it locally
-
-```bash
+### Environment
 cp .env.example .env
-# edit .env — at minimum set real values for JWT_ACCESS_SECRET and JWT_REFRESH_SECRET
-# Stripe/Anthropic keys can stay as placeholders — checkout/webhook calls will
-# 503 without a real Stripe key, and AI falls back to the template without a
-# real Anthropic key. Neither blocks the rest of the app.
 
-docker compose up --build
-```
+#### Edit .env (api/.env and worker/.env if present) and set at minimum:
 
-First time only, generate the initial migration before `docker compose up`:
+JWT_ACCESS_SECRET=...         # long random string
+JWT_REFRESH_SECRET=...        # different long random string
+DATABASE_URL=postgresql://fulfilio:fulfilio@localhost:5432/fulfilio
+REDIS_URL=redis://localhost:6379
+STRIPE_SECRET_KEY=sk_test_xxx
+STRIPE_WEBHOOK_SECRET=whsec_xxx   # from stripe listen
+ANTHROPIC_API_KEY=               # optional (leave empty for fallback)
+Run services
 
-```bash
-cd api && npm install && npx prisma migrate dev --name init
-```
+Start Postgres & Redis:
 
-Seed demo data:
+docker compose up -d postgres redis
 
-```bash
-cd api && npx prisma db seed
-```
+Start API:
 
-## Running the tests
-
-```bash
 cd api
 npm install
-export DATABASE_URL="postgresql://fulfilio:fulfilio@localhost:5432/fulfilio_test"
-npm test
-```
+npx prisma migrate dev --name init
+npm run dev          # API on http://localhost:4000
 
-Or against Docker's Postgres:
+Start worker (separate terminal):
 
-```bash
-docker compose up -d postgres
-export DATABASE_URL="postgresql://fulfilio:fulfilio@localhost:5432/fulfilio_test"
-cd api && npx prisma db push --skip-generate && npm test
-```
+cd worker
+npm install
+npx prisma generate
+npm run dev
 
-## Frontend (client/)
+Start frontend:
 
-A Next.js 14 (App Router) + TypeScript + Tailwind dashboard in `client/` —
-auth, workspace switching, product catalog, order creation, and Stripe
-checkout handoff, plus live Socket.IO updates and the AI daily-summary card.
-Design direction and rationale are written up in `client/DESIGN.md`.
-
-**Note:** this was built without the ability to run `npm install` or
-`next build` in the environment that generated it (no network access there)
-— it's written carefully but your first real compile is the actual
-verification. Report back anything that breaks and it'll get fixed fast.
-
-### Running it
-
-```bash
 cd client
 cp .env.local.example .env.local
-# edit .env.local if your API isn't on the default http://localhost:4000
 npm install
-npm run dev
-```
+npm run dev          # Frontend on http://localhost:3000
 
-Opens on `http://localhost:3000`. It talks to whatever `NEXT_PUBLIC_API_URL`
-points at — run the backend (`docker compose up` from the repo root, or
-`cd api && npm run dev` + `cd worker && npm run dev` separately) first, or
-the frontend has nothing to call.
+Optional: seed demo data
 
-Register a new account from the UI, or sign in with a seeded demo user
-(`owner@fulfilio.dev` / `demo12345` after `cd api && npx prisma db seed`) —
-either way you'll be prompted to create or select a workspace before
-anything else loads.
+cd api
+npx prisma db seed
+# demo credentials: owner@fulfilio.dev / demo12345 (if seed exists)
+Stripe & webhook testing (local)
+Install Stripe CLI and forward events to your local webhook:
+npm install -g @stripe/cli
+stripe listen --forward-to http://localhost:4000/api/v1/payments/webhook --api-key sk_test_...
+Copy the whsec_... webhook secret into api/.env and restart the API.
+Create an order in the frontend, start checkout and use test card 4242 4242 4242 4242 (CVC 123). After webhook processing the order should move from PENDING → PAID.
+Running tests
 
-### What it covers vs. what it doesn't
+### Run integration/unit tests (uses a real Postgres test DB):
 
-Covers: register/login (with refresh-token rotation handled transparently —
-an access token expiring mid-session triggers one silent refresh, not a
-forced logout), first-run workspace creation and switching, product
-browsing with inventory adjustment (+1/−1), product creation, multi-item
-order creation with the `Idempotency-Key` header wired to match the
-backend's dedupe contract, order status advancement/cancellation/assignment,
-Stripe checkout handoff, live order/inventory/presence updates over the
-same Socket.IO connection the backend exposes, and the AI daily-summary
-card on the overview page.
+cd api
+export DATABASE_URL="postgresql://fulfilio:fulfilio@localhost:5432/fulfilio_test"
+npm test
 
-Doesn't cover (not in scope for this pass): invitations UI (accepting/
-sending invites), AI triage UI (the daily-summary card is built; triage
-isn't), member role management UI, search/pagination on the product list.
-All of those already work against the existing API — this is a client-side
-gap, not a backend one.
+CI runs the same steps via GitHub Actions.
 
+## API overview (selected routes)
+POST /api/v1/auth — register/login/refresh/logout
+POST /api/v1/workspaces — create workspace (creator = OWNER)
+POST /api/v1/workspaces/:id/invite — invite by email (OWNER/MANAGER)
+POST /api/v1/invitations/:token/accept — accept invite (email must match)
+GET /api/v1/workspaces/:id/products — list products (search, page, sort)
+POST /api/v1/workspaces/:id/orders — create order (supports Idempotency-Key header)
+POST /api/v1/workspaces/:id/orders/:oid/checkout — create Stripe Checkout session
+POST /api/v1/payments/webhook — Stripe webhook (raw body; signature verified)
+POST /api/v1/workspaces/:id/ai/daily-summary — AI daily summary (POST)
 
+See the code for full route list and request/response shapes.
 
-I can't do this step myself — there's no live GitHub repo or hosting account
-connected to this project, so what follows is exactly what to run yourself.
+### Known limitations & future improvements
+Email jobs are console-log stubs by default (configure Resend for staging).
+AI full path tested only via fallback template; enable Anthropic/OpenAI keys for LLM responses.
+Worker ↔ Socket.IO cross-process events require @socket.io/redis-adapter for horizontal scaling (recommended for staging/prod).
+Queue constants are duplicated between API and worker (easy refactor: a shared package).
+Frontend lacks invitations/member-management UI and advanced AI triage UI.
+Swagger/OpenAPI documentation not yet added.
 
-```bash
-git init
-git add .
-git commit -m "Fulfilio v1: auth, workspaces, products, orders, payments, real-time, AI"
-git branch -M main
-git remote add origin <your-empty-github-repo-url>
-git push -u origin main
-```
+### Deployment (quick hints)
 
-For future changes, branch and PR instead of pushing to `main` directly —
-`.github/workflows/ci.yml` runs lint/typecheck/tests against a real
-Postgres+Redis on every PR, and deploys on merge to `main` once the hooks
-below are wired up.
+#### Backend (recommended) — Render
+Use the included render.yaml (blueprint) to provision API, worker, Postgres and Redis automatically in Render.
+Add Render deploy hook(s) to GitHub Secrets and set environment variables:
+DATABASE_URL
+REDIS_URL
+STRIPE_SECRET_KEY
+STRIPE_WEBHOOK_SECRET
+ANTHROPIC_API_KEY
+RESEND_API_KEY
+JWT_ACCESS_SECRET
+JWT_REFRESH_SECRET
 
-**To get a real staging URL:**
-1. Render → New → Blueprint → point it at your repo → it reads `render.yaml`
-   and provisions `fulfilio-api`, `fulfilio-worker`, Postgres, and Redis.
-2. Copy the two deploy hook URLs Render gives each service into your repo's
-   GitHub Settings → Secrets as `RENDER_DEPLOY_HOOK_API` and
-   `RENDER_DEPLOY_HOOK_WORKER`.
-3. Add `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, and (optionally)
-   `ANTHROPIC_API_KEY` as env vars on the Render `fulfilio-api` service
-   directly (not in `render.yaml`, since those are secrets).
-4. Vercel → New Project → import the same repo → auto-deploys the frontend
-   on every push to `main`, once a `client/` folder exists.
+#### Frontend — Vercel
+Import client/ into Vercel, set NEXT_PUBLIC_API_URL to your backend URL, and deploy.
 
-Once wired up once, every future merge to `main` deploys automatically.
+### Demo script (2-minute demo)
+
+Seed demo data (npx prisma db seed) and note demo credentials.
+Login as demo owner → create product → create order.
+Start checkout → pay with Stripe test card → webhook updates order to PAID.
+Open another browser tab (same workspace) and observe live order status updates via Socket.IO.
+Hit /api/v1/workspaces/:id/ai/daily-summary to view generated summary card.
+
+### Contributing / Extending
+#### Suggested improvements:
+
+Add @socket.io/redis-adapter and test cross-process events.
+Wire a real email provider (Resend) and change worker job handlers from console-stubs to real sends.
+Add Swagger/OpenAPI for API docs and a client API SDK generator.
+Extract shared constants into a packages/common workspace for reuse.
+
+### Contact
+
+If you need help deploying to Render/Vercel or wiring Resend/Stripe, open an issue or contact me via the repo.
