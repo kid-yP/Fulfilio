@@ -1,0 +1,9 @@
+{
+  "name": "fulfilio-glitch",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "postinstall": "cd api && npm install && npm run build && cd ../worker && npm install && npm run build",
+    "start": "node start-glitch.js"
+  }
+}
