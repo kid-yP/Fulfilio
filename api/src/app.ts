@@ -35,6 +35,11 @@ export function createApp() {
 
   app.use(express.json());
 
+  // Simple health endpoint used by Replit and other PaaS health checks
+  app.get("/api", (_req, res) => {
+    res.json({ status: "ok" });
+  });
+
   app.use(healthRouter);
 
   app.use(
