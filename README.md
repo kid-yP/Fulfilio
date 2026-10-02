@@ -90,3 +90,4 @@ cd ../client
 cp .env.local.example .env.local
 npm install
 npm run dev  # Frontend on http://localhost:3000
+
